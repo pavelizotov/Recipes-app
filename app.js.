@@ -1,0 +1,176 @@
+// Minimal PWA app
+let recipes = [];
+const recipeList = document.getElementById('recipeList');
+const detail = document.getElementById('detail');
+const importBtn = document.getElementById('importBtn');
+const exportBtn = document.getElementById('exportBtn');
+const toggleEditBtn = document.getElementById('toggleEditBtn');
+const fileInput = document.getElementById('fileInput');
+const tpl = document.getElementById('recipeItemTpl').content;
+
+let editMode = false;
+const DATA_URL = '/recipes.json'; // host this file in same repo
+
+// register sw
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/service-worker.js').catch(()=>{});
+}
+
+function fetchRecipes(){
+  fetch(DATA_URL).then(r=>{
+    if(!r.ok) throw new Error();
+    return r.json();
+  }).then(j=>{
+    recipes = j;
+    renderList();
+  }).catch(err=>{
+    // if fetch fails, try localStorage
+    const s = localStorage.getItem('recipes_snapshot');
+    if(s){ recipes = JSON.parse(s); renderList(); }
+    else { detail.innerHTML = '<p class="hint">Не удалось загрузить recipes.json</p>';}
+  });
+}
+
+function renderList(){
+  recipeList.innerHTML = '';
+  recipes.forEach((r,i)=>{
+    const node = tpl.cloneNode(true);
+    node.querySelector('.title').textContent = r.title || `Рецепт ${i+1}`;
+    node.querySelector('.meta').textContent = r.yield ? `Для ${r.yield}` : '';
+    const wrapper = node.firstElementChild;
+    wrapper.addEventListener('click', ()=>openRecipe(i));
+    recipeList.appendChild(wrapper);
+  });
+  localStorage.setItem('recipes_snapshot', JSON.stringify(recipes));
+  // open first if none selected
+  if(recipes.length>0 && !detail.querySelector('.card')) openRecipe(0);
+}
+
+function openRecipe(i){
+  const r = recipes[i];
+  detail.innerHTML = '';
+  const card = document.createElement('div'); card.className='card';
+  const title = document.createElement('h2'); title.textContent = r.title || '';
+  card.appendChild(title);
+
+  if(r.photo){
+    const img = document.createElement('img'); img.className='recipe-photo';
+    img.src = r.photo; img.alt = r.title || 'photo';
+    card.appendChild(img);
+  }
+
+  if(r.ingredients && r.ingredients.length){
+    card.appendChild(Object.assign(document.createElement('div'),{className:'section-title', textContent:'Ингредиенты'}));
+    const ul = document.createElement('ul'); ul.className='ingredients';
+    r.ingredients.forEach(it => {
+      const li = document.createElement('li'); li.textContent = it;
+      ul.appendChild(li);
+    });
+    card.appendChild(ul);
+  }
+
+  if(r.method){
+    card.appendChild(Object.assign(document.createElement('div'),{className:'section-title', textContent:'Метод'}));
+    const p = document.createElement('div'); p.className='method'; p.textContent = r.method;
+    card.appendChild(p);
+  }
+
+  // controls
+  const controls = document.createElement('div'); controls.className='controls';
+  const copyBtn = document.createElement('button'); copyBtn.textContent='Копировать';
+  copyBtn.onclick = ()=>navigator.clipboard.writeText(formatForPrint(r)).then(()=>alert('Скопировано'));
+  controls.appendChild(copyBtn);
+
+  if(editMode){
+    const editBtn = document.createElement('button'); editBtn.textContent='Изменить';
+    editBtn.onclick = ()=>openEditor(i);
+    controls.appendChild(editBtn);
+    const photoBtn = document.createElement('button'); photoBtn.textContent='Добавить фото';
+    photoBtn.onclick = ()=>triggerPhotoUpload(i);
+    controls.appendChild(photoBtn);
+  }
+
+  card.appendChild(controls);
+  detail.appendChild(card);
+}
+
+function formatForPrint(r){
+  return `${r.title}\n\nИнгредиенты:\n${(r.ingredients||[]).join('\n')}\n\nМетод:\n${r.method || ''}`;
+}
+
+function openEditor(i){
+  const r = recipes[i];
+  detail.innerHTML = '';
+  const card = document.createElement('div'); card.className='card editable';
+  card.innerHTML = `
+    <label>Название<br><input id="eTitle" value="${escapeHtml(r.title||'')}" style="width:100%"></label>
+    <div style="margin-top:8px"><label>Ингредиенты (по одному на строку)<br><textarea id="eIngs" style="width:100%;height:120px">${escapeHtml((r.ingredients||[]).join('\n'))}</textarea></label></div>
+    <div style="margin-top:8px"><label>Метод<br><textarea id="eMethod" style="width:100%;height:160px">${escapeHtml(r.method||'')}</textarea></label></div>
+  `;
+  const save = document.createElement('button'); save.textContent='Сохранить'; save.onclick = ()=>{
+    r.title = document.getElementById('eTitle').value;
+    r.ingredients = document.getElementById('eIngs').value.split(/\n/).map(s=>s.trim()).filter(Boolean);
+    r.method = document.getElementById('eMethod').value;
+    renderList();
+    openRecipe(i);
+    alert('Сохранено локально. Не забудьте экспортировать JSON или закоммитить changes в репозиторий.');
+  };
+  card.appendChild(save);
+  detail.appendChild(card);
+}
+
+function triggerPhotoUpload(i){
+  const input = document.createElement('input'); input.type='file'; input.accept='image/*';
+  input.onchange = async (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const data = await fileToBase64(f);
+    recipes[i].photo = data; renderList(); openRecipe(i);
+    alert('Фото добавлено локально. Чтобы фото было доступно всем, загрузите его в репозиторий /images и поменяйте путь в JSON.');
+  };
+  input.click();
+}
+
+function fileToBase64(file){
+  return new Promise(res=>{
+    const r = new FileReader();
+    r.onload = ()=>res(r.result);
+    r.readAsDataURL(file);
+  });
+}
+
+function escapeHtml(s){ return (s||'').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+importBtn.onclick = ()=>fileInput.click();
+fileInput.onchange = e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const reader = new FileReader();
+  reader.onload = ()=> {
+    try{
+      recipes = JSON.parse(reader.result);
+      renderList();
+      alert('Импорт выполнен локально. Чтобы изменения были у всех, загрузите файл recipes.json в репозиторий/хостинг.');
+    }catch(err){ alert('Неверный JSON'); }
+  };
+  reader.readAsText(f);
+};
+
+exportBtn.onclick = ()=> {
+  const blob = new Blob([JSON.stringify(recipes,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='recipes.json'; a.click();
+  URL.revokeObjectURL(url);
+};
+
+toggleEditBtn.onclick = ()=>{
+  editMode = !editMode;
+  toggleEditBtn.textContent = editMode ? 'Выход' : 'Редактировать';
+  // re-render current
+  const selectedIndex = 0;
+  renderList();
+  if(recipes.length) openRecipe(selectedIndex);
+};
+
+// initial fetch
+fetchRecipes();
